@@ -40,10 +40,7 @@ class SQALA:
         self.engine = create_async_engine(
             self.url,
             pool_recycle=1500,  # 连接回收时间
-            pool_size=5,  # 连接池大小，限制并发连接数
-            max_overflow=10,  # 超出 pool_size 后最多额外创建的连接数
             pool_pre_ping=True,  # 使用前检查连接是否有效
-            pool_timeout=30,  # 获取连接的超时时间
             echo=False,  # 关闭 SQL 日志减少内存
         )
         self.async_session = sessionmaker(
