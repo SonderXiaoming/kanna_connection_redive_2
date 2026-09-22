@@ -2,7 +2,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Union
 
-from sqlalchemy import asc, delete, desc, insert, update
+from sqlalchemy import asc, delete, desc, insert, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.future import select
 from sqlalchemy.orm import sessionmaker
@@ -24,6 +24,8 @@ from .models import (
     SLDao,
     SupportUnit,
     WebAccount,
+    WebNotificationEvent,
+    WebNotificationSetting,
 )
 
 
@@ -40,10 +42,7 @@ class SQALA:
         self.engine = create_async_engine(
             self.url,
             pool_recycle=1500,  # 连接回收时间
-            pool_size=5,  # 连接池大小，限制并发连接数
-            max_overflow=10,  # 超出 pool_size 后最多额外创建的连接数
             pool_pre_ping=True,  # 使用前检查连接是否有效
-            pool_timeout=30,  # 获取连接的超时时间
             echo=False,  # 关闭 SQL 日志减少内存
         )
         self.async_session = sessionmaker(
@@ -63,6 +62,29 @@ class SQALA:
     async def create_all(self):
         async with self.engine.begin() as conn:
             await conn.run_sync(DataBase.metadata.create_all)
+            columns = {
+                row[1]
+                for row in (
+                    await conn.execute(text("PRAGMA table_info(webnotificationsetting)"))
+                ).fetchall()
+            }
+            migrations = {
+                "event_types": (
+                    "ALTER TABLE webnotificationsetting ADD COLUMN event_types "
+                    "VARCHAR NOT NULL DEFAULT '[\"notice\", \"report\", \"monitor\", \"arena\", \"role\"]'"
+                ),
+                "quiet_start": (
+                    "ALTER TABLE webnotificationsetting ADD COLUMN quiet_start "
+                    "VARCHAR NOT NULL DEFAULT ''"
+                ),
+                "quiet_end": (
+                    "ALTER TABLE webnotificationsetting ADD COLUMN quiet_end "
+                    "VARCHAR NOT NULL DEFAULT ''"
+                ),
+            }
+            for column, statement in migrations.items():
+                if column not in columns:
+                    await conn.execute(text(statement))
 
     # 账号部分
     async def query_account(self, user_id: int) -> List[Account]:
@@ -76,22 +98,87 @@ class SQALA:
     async def add_account(self, user_id: int, account: dict):
         async with self.async_session() as session:
             async with session.begin():
-                if await self.query_account(user_id):
+                platform = account.get("platform")
+                if platform is None:
+                    update_values = {
+                        key: value
+                        for key, value in account.items()
+                        if key not in {"id", "user_id"}
+                    }
+                    if not update_values:
+                        return
                     await session.execute(
                         update(Account)
                         .where(Account.user_id == user_id)
-                        .values(**account)
+                        .values(**update_values)
+                    )
+                    return
+                result = await session.execute(
+                    select(Account).where(
+                        Account.user_id == user_id,
+                        Account.platform == platform,
+                    )
+                )
+                if result.scalars().first():
+                    update_values = {
+                        key: value
+                        for key, value in account.items()
+                        if key not in {"id", "user_id", "platform"}
+                    }
+                    await session.execute(
+                        update(Account)
+                        .where(
+                            Account.user_id == user_id,
+                            Account.platform == platform,
+                        )
+                        .values(**update_values)
                     )
                 else:
-                    await session.execute(insert(Account).values(**account))
+                    insert_values = dict(account)
+                    insert_values.pop("id", None)
+                    insert_values["user_id"] = user_id
+                    await session.execute(insert(Account).values(**insert_values))
 
-    async def change_access(self, user_id: int, level: int):
+    async def delete_account(self, user_id: int, platform: int):
         async with self.async_session() as session:
             async with session.begin():
+                result = await session.execute(
+                    select(Account.refresh).where(
+                        Account.user_id == user_id,
+                        Account.platform == platform,
+                        Account.refresh.is_not(None),
+                    )
+                )
+                refresh_accounts = set(result.scalars().all())
                 await session.execute(
-                    update(Account)
-                    .where(Account.user_id == user_id)
-                    .values(allow_others=level)
+                    delete(Account).where(
+                        Account.user_id == user_id,
+                        Account.platform == platform,
+                    )
+                )
+                for refresh_account in refresh_accounts:
+                    result = await session.execute(
+                        select(Account.id).where(
+                            Account.refresh == refresh_account
+                        )
+                    )
+                    if result.scalars().first() is None:
+                        await session.execute(
+                            delete(RefreshAccount).where(
+                                RefreshAccount.account == refresh_account
+                            )
+                        )
+
+    async def change_access(
+        self, user_id: int, level: int, platform: Optional[int] = None
+    ):
+        async with self.async_session() as session:
+            async with session.begin():
+                sql = update(Account).where(Account.user_id == user_id)
+                if platform is not None:
+                    sql = sql.where(Account.platform == platform)
+                await session.execute(
+                    sql.values(allow_others=level)
                 )
 
     async def query_refresh(self, account: str) -> RefreshAccount:
@@ -255,7 +342,7 @@ class SQALA:
                 sql = select(NoticeCache).where(
                     NoticeCache.notice_type == item,
                     NoticeCache.group_id == group_id,
-                    NoticeCache.time - int(time.time()) <= 24 * 3600,
+                    NoticeCache.time >= int(time.time()) - 24 * 3600,
                 )
                 if boss:
                     sql = sql.filter(NoticeCache.boss == boss)
@@ -446,6 +533,33 @@ class SQALA:
                 )
                 return result.scalars().all()
 
+    async def get_clan_member(
+        self, group_id: int, user_id: int
+    ) -> Optional[ClanBattleMember]:
+        async with self.async_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(ClanBattleMember).where(
+                        ClanBattleMember.group_id == group_id,
+                        ClanBattleMember.user_id == user_id,
+                    )
+                )
+                return result.scalar_one_or_none()
+
+    async def update_clan_member_role(
+        self, group_id: int, user_id: int, priority: int, group_name: str
+    ):
+        async with self.async_session() as session:
+            async with session.begin():
+                await session.merge(
+                    ClanBattleMember(
+                        group_id=group_id,
+                        user_id=user_id,
+                        group_name=group_name,
+                        priority=priority,
+                    )
+                )
+
     # 竞技场设置
     async def init_jjc_setting(self, user_setting: ArenaSetting):
         async with self.async_session() as session:
@@ -503,16 +617,6 @@ class SQALA:
                 return result.scalar_one_or_none() or 0
 
     # Web
-    async def web_check_user(self, account: str, password: str) -> WebAccount:
-        async with self.async_session() as session:
-            async with session.begin():
-                result = await session.execute(
-                    select(WebAccount).where(
-                        WebAccount.account == account, WebAccount.password == password
-                    )
-                )
-                return result.scalar_one_or_none()
-
     async def web_query_user(self, account) -> WebAccount:
         async with self.async_session() as session:
             async with session.begin():
@@ -525,9 +629,69 @@ class SQALA:
         async with self.async_session() as session:
             async with session.begin():
                 account.create_time = time.time()
-                if user := await self.web_check_user(account.account, account.password):
+                if user := await self.web_query_user(account.account):
                     account.priority = user.priority
                 await session.merge(account)
+
+    async def web_update_password(self, account: str, password: str):
+        async with self.async_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(WebAccount)
+                    .where(WebAccount.account == account)
+                    .values(password=password)
+                )
+
+    async def web_list_users(
+        self, query: Optional[str] = None, limit: int = 200
+    ) -> List[WebAccount]:
+        async with self.async_session() as session:
+            async with session.begin():
+                sql = select(WebAccount).order_by(desc(WebAccount.create_time))
+                if query:
+                    sql = sql.where(WebAccount.account.contains(query))
+                result = await session.execute(sql.limit(limit))
+                return result.scalars().all()
+
+    async def web_update_priority(self, account: str, priority: int):
+        async with self.async_session() as session:
+            async with session.begin():
+                await session.execute(
+                    update(WebAccount)
+                    .where(WebAccount.account == account)
+                    .values(priority=priority)
+                )
+
+    async def web_count_cookies(self, user_id: str) -> int:
+        async with self.async_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(func.count(CookieCache.token)).where(
+                        CookieCache.user_id == user_id
+                    )
+                )
+                return result.scalar_one()
+
+    async def web_delete_user(self, account: str):
+        async with self.async_session() as session:
+            async with session.begin():
+                await session.execute(
+                    delete(CookieCache).where(CookieCache.user_id == account)
+                )
+                if account.isdigit():
+                    await session.execute(
+                        delete(WebNotificationSetting).where(
+                            WebNotificationSetting.user_id == int(account)
+                        )
+                    )
+                    await session.execute(
+                        delete(WebNotificationEvent).where(
+                            WebNotificationEvent.user_id == int(account)
+                        )
+                    )
+                await session.execute(
+                    delete(WebAccount).where(WebAccount.account == account)
+                )
 
     async def web_add_cookie(self, token: str, user_id: str):
         async with self.async_session() as session:
@@ -539,7 +703,7 @@ class SQALA:
     ):
         async with self.async_session() as session:
             async with session.begin():
-                if not token or user_id:
+                if not token and not user_id:
                     raise ValueError("需要指定token或者user")
                 sql = delete(CookieCache)
                 if token:
@@ -547,6 +711,15 @@ class SQALA:
                 if user_id:
                     sql = sql.filter(CookieCache.user_id == user_id)
                 await session.execute(sql)
+
+    async def web_delete_expired_cookies(self, max_age: int):
+        async with self.async_session() as session:
+            async with session.begin():
+                await session.execute(
+                    delete(CookieCache).where(
+                        CookieCache.time < int(time.time()) - max_age
+                    )
+                )
 
     async def web_query_cookie(self, token: str) -> CookieCache:
         async with self.async_session() as session:
@@ -556,5 +729,92 @@ class SQALA:
                 )
                 return result.scalar_one_or_none()
 
+    async def web_get_notification_setting(
+        self, user_id: int
+    ) -> Optional[WebNotificationSetting]:
+        async with self.async_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(WebNotificationSetting).where(
+                        WebNotificationSetting.user_id == user_id
+                    )
+                )
+                return result.scalar_one_or_none()
+
+    async def web_set_notification_setting(
+        self, setting: WebNotificationSetting
+    ):
+        async with self.async_session() as session:
+            async with session.begin():
+                setting.update_time = int(time.time())
+                await session.merge(setting)
+
+    async def web_add_notification_event(self, event: WebNotificationEvent):
+        async with self.async_session() as session:
+            async with session.begin():
+                session.add(event)
+
+    async def web_list_notification_events(
+        self, user_id: int, after_id: int = 0, limit: int = 100
+    ) -> List[WebNotificationEvent]:
+        async with self.async_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(WebNotificationEvent)
+                    .where(
+                        WebNotificationEvent.user_id == user_id,
+                        WebNotificationEvent.id > after_id,
+                    )
+                    .order_by(asc(WebNotificationEvent.id))
+                    .limit(limit)
+                )
+                return result.scalars().all()
+
+    async def query_accounts_by_users(self, user_ids: List[int]) -> List[Account]:
+        if not user_ids:
+            return []
+        async with self.async_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(Account).where(Account.user_id.in_(user_ids))
+                )
+                return result.scalars().all()
+
+    async def get_all_clan_groups(self):
+        async with self.async_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(
+                        ClanBattleMember.group_id,
+                        func.max(ClanBattleMember.group_name),
+                        func.count(ClanBattleMember.user_id),
+                    ).group_by(ClanBattleMember.group_id)
+                )
+                return result.all()
+
+    async def web_notification_inbox(
+        self, user_id: int, limit: int = 50
+    ) -> List[WebNotificationEvent]:
+        async with self.async_session() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(WebNotificationEvent)
+                    .where(WebNotificationEvent.user_id == user_id)
+                    .order_by(desc(WebNotificationEvent.id))
+                    .limit(limit)
+                )
+                return result.scalars().all()
+
+    async def web_mark_notifications_read(
+        self, user_id: int, event_id: Optional[int] = None
+    ):
+        async with self.async_session() as session:
+            async with session.begin():
+                sql = update(WebNotificationEvent).where(
+                    WebNotificationEvent.user_id == user_id
+                )
+                if event_id is not None:
+                    sql = sql.where(WebNotificationEvent.id == event_id)
+                await session.execute(sql.values(read=True))
 
 pcr_sqla = SQALA(str(FilePath.data.value / "data.db"))

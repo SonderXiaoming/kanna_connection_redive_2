@@ -1,4 +1,4 @@
-import contextlib
+from ..errorclass import NeedReLoginError
 
 from .apiclient import BCRClient as pcrclient
 from .apiclient import TWClient as tw_pcrclient
@@ -11,6 +11,10 @@ from .response import LoadIndexResponse
 
 async def check_client(client: BaseClient) -> LoadIndexResponse:
     for _ in range(3):
-        with contextlib.suppress(Exception):
+        try:
             return await client.load_index()
+        except NeedReLoginError:
+            raise
+        except Exception:
+            pass
     return None

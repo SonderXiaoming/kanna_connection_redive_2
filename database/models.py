@@ -33,6 +33,34 @@ class WebAccount(DataBase, table=True):
     create_time: Optional[int] = Field(title="过期时间", default=0)
 
 
+class WebNotificationSetting(DataBase, table=True):
+    __table_args__ = {"keep_existing": True}
+    user_id: int = Field(primary_key=True, title="玩家QQ")
+    enabled: bool = Field(default=False, title="是否启用网页通知")
+    delivery: int = Field(default=0, title="通知方式")
+    group_ids: str = Field(default="[]", title="接收通知的群")
+    event_types: str = Field(
+        default='["notice", "report", "monitor", "arena", "role"]',
+        title="接收的事件类型",
+    )
+    quiet_start: str = Field(default="", title="免打扰开始时间")
+    quiet_end: str = Field(default="", title="免打扰结束时间")
+    update_time: int = Field(default_factory=lambda: int(time.time()), title="更新时间")
+
+
+class WebNotificationEvent(DataBase, table=True):
+    __table_args__ = {"keep_existing": True}
+    id: Optional[int] = Field(default=None, primary_key=True, title="序号")
+    user_id: int = Field(index=True, title="接收用户QQ")
+    group_id: Optional[int] = Field(default=None, index=True, title="所属群")
+    event_type: str = Field(default="notice", title="事件类型")
+    title: str = Field(title="标题")
+    body: str = Field(default="", title="正文")
+    url: str = Field(default="", title="网页地址")
+    time: int = Field(default_factory=lambda: int(time.time()), title="创建时间")
+    read: bool = Field(default=False, title="是否已读")
+
+
 class RefreshAccount(DataBase, table=True):
     __table_args__ = {"keep_existing": True}
     account: str = Field(primary_key=True, title="b站账号")
@@ -216,4 +244,4 @@ class CookieCache(DataBase, table=True):
     __table_args__ = {"keep_existing": True}
     token: str = Field(primary_key=True, title="token")
     user_id: str = Field(title="user_id")
-    time: int = Field(default=int(time.time()), title="时间")
+    time: int = Field(default_factory=lambda: int(time.time()), title="时间")

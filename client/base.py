@@ -50,7 +50,7 @@ from .response import (
 
 class BaseClient:
     def __init__(self):
-        self.viewer_id: str = 0
+        self.viewer_id: int = 0
         self.call_lock: asyncio.Lock = asyncio.Lock()
         self.headers: dict = None
         self.client: httpx.AsyncClient = None

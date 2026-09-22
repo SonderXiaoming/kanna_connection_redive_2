@@ -364,7 +364,13 @@ str2mode = {v: k for k, v in mode2str.items()}
 str2mode.update({"公会": 2, "露娜": 2, "地下": 1, "工会": 2, "会战": 2})
 
 
-async def change_support_unit(account: Account, support_unit_id: int, mode: int):
+async def change_support_unit(
+    account: Account,
+    support_unit_id: int,
+    mode: int,
+    include_image: bool = True,
+):
+    result = ""
     try:
         client = await query(account)
         player_info = await client.load_index()
@@ -407,7 +413,6 @@ async def change_support_unit(account: Account, support_unit_id: int, mode: int)
         num_support = len(target_support)
 
         try_position = {1, 2} if mode != 2 else {3, 4}  # 查询目标支援是否有坑位。
-        result = ""
         if num_support == 0:  # 若有坑位，记录坑位。
             try_position = try_position.pop()
         elif num_support == 1:
@@ -464,11 +469,13 @@ async def change_support_unit(account: Account, support_unit_id: int, mode: int)
             ),
             0,
         )
-        result += MessageSegment.image(
-            pic2b64(await generate_box_img([PlayerUnit(**unit_info)]))
-        )
+        if include_image:
+            result += MessageSegment.image(
+                pic2b64(await generate_box_img([PlayerUnit(**unit_info)]))
+            )
     except Exception as e:
         traceback.print_exc()
+        return f"更换失败：{e}"
     return result
 
 

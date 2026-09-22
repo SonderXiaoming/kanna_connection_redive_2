@@ -37,6 +37,11 @@ class NeedRefreshError(Exception):
         super().__init__("access_key过期，重新登录，可能需要重绑")
 
 
+class NeedReLoginError(Exception):
+    def __init__(self):
+        super().__init__("需要重新登录")
+
+
 class RiskControlError(Exception):
     def __init__(self):
         super().__init__("账号存在风险，请改密码后重新登录")

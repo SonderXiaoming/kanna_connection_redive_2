@@ -45,12 +45,10 @@ class WebSetting(Enum):
     网页端！！！
     """
 
-    api_host = "0.0.0.0"
-    api_port = "12138"
-    api_base = "/kanna_dependency"
-    web_host = "yourhost"
-    web_port = "3141"
-    web_base = "/kanna_connection"
+    api_host = "127.0.0.1"
+    api_port = "12139"
+    cookie_secure = False
+    web_public_url = "http://xxxx:12138/kanna_connection"
 
 
 class BossData(Enum):

@@ -24,6 +24,12 @@ from .get_img import render_atk_def_teams, generate_player_rank
 from .base import id_str2list
 
 name_cache = {}
+arena_web_notifier = None
+
+
+def set_arena_web_notifier(notifier):
+    global arena_web_notifier
+    arena_web_notifier = notifier
 
 
 class Arena:
@@ -37,18 +43,42 @@ class Arena:
         self.grand_group = 0
         self.latest_cache_time = 0
         self.user_id = user_id
+        self.account_name = ""
+        self.viewer_id = 0
 
-    async def init(self, client: BaseClient, group_id: int, bot_id: int, platform: int):
+    async def init(
+        self,
+        client: BaseClient,
+        group_id: int,
+        bot_id: int,
+        platform: int,
+        account_name: str = "",
+        viewer_id: int = 0,
+    ):
         self.loop_num += 1
         self.battle_record = []
         self.client = client
         self.platform = platform
         self.group_id = group_id
         self.bot_id = bot_id
+        self.account_name = account_name or self.account_name
+        self.viewer_id = viewer_id or self.viewer_id
         await pcr_sqla.init_jjc_setting(ArenaSetting(user_id=self.user_id))
         self.setting = await pcr_sqla.get_jjc_setting(self.user_id)
         await self.refresh_jjc_info()
         await self.refresh_jjc_info(True)
+
+    async def notify(self, title: str, body: str):
+        if self.group_id:
+            group_body = (
+                f"{body}[CQ:at,qq={self.user_id}]" if "排名" in title else body
+            )
+            await anywhere_send(group_body, self.group_id, self.bot_id)
+        if arena_web_notifier:
+            try:
+                await arena_web_notifier(self.user_id, title, body)
+            except Exception as error:
+                logger.warning(f"竞技场网页通知发送失败：{error}")
 
     async def refresh_jjc_info(self, grand=False):
         if grand:
@@ -251,12 +281,13 @@ class Arena:
 
     async def get_profile_by_cache(self, viewer_id: int):
         now = time.time()
-        if viewer_id in name_cache:
-            if now - name_cache[viewer_id][1] < 3600:
-                return name_cache[viewer_id][0]
-            del name_cache[viewer_id]
+        cache_key = (self.platform, viewer_id)
+        if cache_key in name_cache:
+            if now - name_cache[cache_key][1] < 3600:
+                return name_cache[cache_key][0]
+            del name_cache[cache_key]
         if result := await self.client.profile_get(viewer_id):
-            name_cache[result.user_info.viewer_id] = result, now
+            name_cache[(self.platform, result.user_info.viewer_id)] = result, now
         return result
 
     @staticmethod
@@ -284,36 +315,25 @@ class ArenaPool(PoolBase):
             arena.loop_check = time.time()
             if arena.setting.jjc_notice:
                 arena_info = await arena.client.arena_info()
-                if arena.jjc_rank < arena_info.arena_info.rank:
-                    await anywhere_send(
-                        f"jjc: {arena.jjc_rank}->{arena_info.arena_info.rank} [▽{arena_info.arena_info.rank - arena.jjc_rank}][CQ:at,qq={arena.user_id}]",
-                        arena.group_id,
-                        arena.bot_id,
+                new_rank = arena_info.arena_info.rank
+                if arena.jjc_rank and new_rank != arena.jjc_rank:
+                    improved = new_rank < arena.jjc_rank
+                    await arena.notify(
+                        f"竞技场排名{'上升' if improved else '下降'}",
+                        f"jjc: {arena.jjc_rank}->{new_rank} [{'△' if improved else '▽'}{abs(new_rank - arena.jjc_rank)}]",
                     )
-                    arena.jjc_rank = arena_info.arena_info.rank
-                    """teams = await arena.jjc_query(arena.jjc_rank)
-                    await anywhere_send(
-                        MessageSegment.image(pic2b64(teams)),
-                        arena.group_id,
-                        arena.bot_id,
-                    )
-                    """
+                arena.jjc_rank = new_rank
             if arena.setting.grand_notice:
                 await arena.refresh_cache()
                 grand_info = await arena.client.grand_arena_info()
-                if arena.grand_rank < grand_info.grand_arena_info.rank:
-                    await anywhere_send(
-                        f"pjjc: {arena.grand_rank}->{grand_info.grand_arena_info.rank} [▽{grand_info.grand_arena_info.rank - arena.grand_rank}][CQ:at,qq={arena.user_id}]",
-                        arena.group_id,
-                        arena.bot_id,
+                new_rank = grand_info.grand_arena_info.rank
+                if arena.grand_rank and new_rank != arena.grand_rank:
+                    improved = new_rank < arena.grand_rank
+                    await arena.notify(
+                        f"公主竞技场排名{'上升' if improved else '下降'}",
+                        f"pjjc: {arena.grand_rank}->{new_rank} [{'△' if improved else '▽'}{abs(new_rank - arena.grand_rank)}]",
                     )
-                    arena.grand_rank = grand_info.grand_arena_info.rank
-                    """teams = await arena.grand_query(arena.grand_rank)
-                    await anywhere_send(
-                        MessageSegment.image(pic2b64(teams)),
-                        arena.group_id,
-                        arena.bot_id,
-                    )"""
+                arena.grand_rank = new_rank
 
             arena.error_count = 0
         asyncio.create_task(
@@ -332,7 +352,8 @@ class ArenaHandle:
         self.loop_num = loop_num
 
     async def __aenter__(self):
-        run_group[self.arena_info.group_id] = self.arena_info.bot_id
+        if self.arena_info.group_id:
+            run_group[self.arena_info.group_id] = self.arena_info.bot_id
         self.arena_info.loop_check = time.time()
         return self
 
@@ -345,27 +366,24 @@ class ArenaHandle:
             del run_group[self.arena_info.group_id]
 
         if self.loop_num != self.arena_info.loop_num:
-            await anywhere_send(
+            await self.arena_info.notify(
+                "竞技场监控已关闭",
                 f"#编号HN100{self.loop_num}监控已关闭",
-                self.arena_info.group_id,
-                self.arena_info.bot_id,
             )
             return
 
         if not await check_client(self.arena_info.client):
-            await anywhere_send(
+            await self.arena_info.notify(
+                "竞技场监控已退出",
                 "当前账号被顶号，竞技场监控已退出",
-                self.arena_info.group_id,
-                self.arena_info.bot_id,
             )
             return
 
         if self.arena_info.error_count > 3:
             self.arena_info.error_count = 0
-            await anywhere_send(
-                f"超过最大重试次数，竞技场监控已退出{exc_value}: {traceback}",
-                self.arena_info.group_id,
-                self.arena_info.bot_id,
+            await self.arena_info.notify(
+                "竞技场监控异常退出",
+                f"超过最大重试次数，竞技场监控已退出：{exc_value}",
             )
             return
 
@@ -374,7 +392,8 @@ class ArenaHandle:
         )
         self.arena_info.loop_check = time.time()
         self.arena_info.error_count += 1
-        run_group[self.arena_info.group_id] = self.arena_info.bot_id
+        if self.arena_info.group_id:
+            run_group[self.arena_info.group_id] = self.arena_info.bot_id
         return True
 
 
@@ -403,6 +422,25 @@ class AreanUsePool:
         ):
             return self.jjc_info_group[group_id]
         return None
+
+    def get_owned_arena(self, qq_id: int, platform: Optional[int] = None) -> Optional[Arena]:
+        arena = self.jjc_info.get(qq_id)
+        if not arena or not arena.loop_check:
+            return None
+        if platform is not None and arena.platform != platform:
+            return None
+        return arena
+
+    def active_arenas(self) -> List[Arena]:
+        seen = set()
+        result = []
+        for arena in list(self.jjc_info.values()) + list(self.jjc_info_group.values()):
+            marker = id(arena)
+            if marker in seen or not arena.loop_check:
+                continue
+            seen.add(marker)
+            result.append(arena)
+        return result
 
     def delete_arena(
         self, qq_id: int, group_id: Optional[int] = None
