@@ -10,7 +10,7 @@
 - ⚔️ 竞技场杀手（详见下面说明）
 - ✨ 更加优雅的代码结构
 - 🚀 更快的性能以及高并发支持
-- 🌐 WEBUI 支持（具体部署教程在编写中）
+- 🌐 WebUI 支持（见下方部署与使用说明）
 - 🌍 三服支持（B服、渠道服、台服）
 
 ## ⚠️ 严重警告
@@ -149,6 +149,65 @@ BOSS：1-5，对应公会战的一至五王，可以‘123’或者‘12’,也�
 </details>
 ---
 
+## 🌐 网页端 WebUI
+
+网页端前端代码位于 [kanna_connection_webui](https://github.com/SonderXiaoming/kanna_connection_webui)。启用本插件后，后端会在 `WebSetting.api_host` 和 `WebSetting.api_port` 指定的地址启动 FastAPI；默认地址是 `127.0.0.1:12139`。前端页面、静态文件和对外访问入口需要另行部署。
+
+网页端包含会战面板、通知与出刀记录、公会管理、BOX 与助战、竞技场中心，以及个人账号和通知设置。页面显示和可执行的操作会根据所在公会及账号权限变化。
+
+### 页面预览
+
+下图由当前前端页面截取。登录页填入测试 QQ `1316864423`，密码留空；首页通过该账号真实登录后截取，公会名称和群号已替换为演示文字。会战面板使用虚构的会战数据及 BOSS 占位图，不代表真实账号的当前记录。
+
+**登录页**
+
+![环奈连结网页登录页](docs/images/webui-login.png)
+
+**首页与功能入口**
+
+![环奈连结网页首页演示](docs/images/webui-home.png)
+
+**会战面板**
+
+![环奈连结会战面板演示](docs/images/webui-dashboard.png)
+
+### 部署前端
+
+1. 确认机器人已加载本插件，并在服务器本机访问 `http://127.0.0.1:12139/docs` 检查 API 是否启动。若修改了 `WebSetting.api_host` 或 `WebSetting.api_port`，使用修改后的地址。
+2. 安装 Node.js 20 和 npm，构建网页静态文件：
+
+   ```sh
+   git clone https://github.com/SonderXiaoming/kanna_connection_webui.git
+   cd kanna_connection_webui
+   npm ci
+   npm run build
+   ```
+
+   构建结果在 `dist/`。也可以从 [前端 Releases](https://github.com/SonderXiaoming/kanna_connection_webui/releases) 下载打包文件并解压，其中包含 `dist/`。
+
+3. 将 `dist/` 放在 Web 服务器上，参考前端仓库的 [Nginx 配置示例](https://github.com/SonderXiaoming/kanna_connection_webui/blob/main/deploy/nginx.conf.example)，把网页部署在 `/kanna_connection/`，并将 `/kanna_connection/api/` 反向代理到 `127.0.0.1:12139`。按实际情况修改静态文件目录、域名、端口和 HTTPS 配置。网页与 API 应使用同一站点；刷新 `/kanna_connection/home` 等子页面时要回退到 `index.html`。
+4. 在本插件的 `setting.py` 中设置公开访问地址；例如：
+
+   ```python
+   class WebSetting(Enum):
+       api_host = "127.0.0.1"
+       api_port = "12139"
+       cookie_secure = True
+       web_public_url = "https://example.com/kanna_connection"
+   ```
+
+   `web_public_url` 必须与实际网页地址一致，机器人生成的登录链接会使用它。上例启用了 HTTPS，因此 `cookie_secure` 为 `True`；若仅在 HTTP 环境测试，则设为 `False`。修改配置后重启机器人。不要将内部 API 端口 `12139` 直接暴露到公网。
+
+### 登录与使用
+
+- 向机器人**私聊**发送 `网页端登录`，打开返回的单次登录链接。链接有效期为 5 分钟，使用一次后即失效；过期时重新获取即可。
+- 如需密码登录，私聊发送 `设置网页密码 新密码`。网页密码需为 8 至 128 个字符。登录页填写 QQ 号和此网页密码，**不是 QQ 密码**。
+- 登录后从首页进入公会战、BOX／助战、竞技场及公会管理功能。涉及刷新 BOX、挂载助战等操作时，网页会提示确认游戏账号登录；这类操作可能使游戏客户端掉线。
+
+若页面能打开但登录或数据加载失败，先确认 `web_public_url`、`/kanna_connection/api/` 反向代理和后端 `12139` 端口是否一致。若只在刷新子页面时出现 404，检查 Nginx 的 `index.html` 回退规则。前端仓库的 [README](https://github.com/SonderXiaoming/kanna_connection_webui#readme) 有更完整的构建与发布说明。
+
+---
+
 ## 🖼️ BOX 查询效果展示
 
 ![f83157d3b7fe674cd6043c7cb57f24c6_720](https://github.com/user-attachments/assets/f89e4270-a4d4-4ad8-85c8-47c3730cc548)
@@ -195,7 +254,3 @@ BOSS：1-5，对应公会战的一至五王，可以‘123’或者‘12’,也�
 | 1.0.0 | 好的开始 |
 
 ---
-
-## 🚧 TODO
-
-- [ ] 网页端帮助文档
