@@ -200,6 +200,32 @@ class SQALA:
             async with session.begin():
                 session.add_all(dao_list)
 
+    async def correct_kill_damage(self, group_id: int, caps: dict):
+        async with self.async_session() as session:
+            async with session.begin():
+                for (pcrid, lap, boss, timestamp), cap in caps.items():
+                    result = await session.execute(
+                        select(RecordDao).where(
+                            RecordDao.group_id == group_id,
+                            RecordDao.pcrid == pcrid,
+                            RecordDao.lap == lap,
+                            RecordDao.boss == boss,
+                            RecordDao.time == timestamp,
+                        )
+                    )
+                    records = result.scalars().all()
+                    if len(records) == 1 and records[0].damage > cap:
+                        records[0].damage = cap
+
+    async def get_record_keys_at(self, group_id: int, timestamp: int) -> set:
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(RecordDao.pcrid, RecordDao.lap, RecordDao.boss, RecordDao.time).where(
+                    RecordDao.group_id == group_id, RecordDao.time == timestamp
+                )
+            )
+            return {tuple(row) for row in result.all()}
+
     async def get_history(self, id: int, group_id: int) -> RecordDao:
         async with self.async_session() as session:
             async with session.begin():
