@@ -6,6 +6,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import httpx
 import asyncio
+import threading
 from msgpack import unpackb
 from .request import (
     RequestBase,
@@ -48,10 +49,32 @@ from .response import (
 )
 
 
+class CrossLoopLock:
+    """可跨事件循环使用的异步互斥锁。
+
+    同一个客户端实例会被机器人主循环和 webui(uvicorn 独立线程)这两个
+    不同的 event loop 同时使用；asyncio.Lock 只能绑定一个 loop，跨 loop
+    等待已占用的锁会抛 "got Future attached to a different loop"。这里用
+    threading.Lock 非阻塞获取 + 短轮询实现跨 loop 互斥，保证同一账号的
+    游戏请求严格串行，避免并发请求互相干扰或触发风控。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    async def __aenter__(self):
+        while not self._lock.acquire(blocking=False):
+            await asyncio.sleep(0.05)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self._lock.release()
+
+
 class BaseClient:
     def __init__(self):
         self.viewer_id: int = 0
-        self.call_lock: asyncio.Lock = asyncio.Lock()
+        self._api_lock = CrossLoopLock()
         self.headers: dict = None
         self.client: httpx.AsyncClient = None
 
