@@ -3,13 +3,12 @@ import binascii
 from collections import deque
 import random
 import re
-import threading
 import traceback
 from base64 import b64decode, b64encode
 from hashlib import md5, sha1
 from json import loads
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 import httpx
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
@@ -146,15 +145,21 @@ qu_apiroot = ServerManager(
     ]
 )
 
-_http_clients: Dict[Tuple[Any, bool], httpx.AsyncClient] = {}
-_http_clients_lock = threading.Lock()
-
-
 def _current_loop():
     try:
         return asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.get_event_loop()
+
+
+def _loop_http_clients(
+    loop: asyncio.AbstractEventLoop,
+) -> Dict[bool, httpx.AsyncClient]:
+    clients = getattr(loop, "_kanna_http_clients", None)
+    if clients is None:
+        clients = {}
+        loop._kanna_http_clients = clients
+    return clients
 
 
 def get_async_client(verify: bool = True) -> httpx.AsyncClient:
@@ -164,27 +169,20 @@ def get_async_client(verify: bool = True) -> httpx.AsyncClient:
     复用连接会抛 "got Future attached to a different loop"。因此按
     (loop, verify) 惰性创建客户端，各 loop 拥有独立的连接池。
     """
-    key = (_current_loop(), verify)
-    with _http_clients_lock:
-        client = _http_clients.get(key)
-        if client is None:
-            client = httpx.AsyncClient(verify=verify, timeout=20)
-            _http_clients[key] = client
-        return client
+    clients = _loop_http_clients(_current_loop())
+    client = clients.get(verify)
+    if client is None:
+        client = httpx.AsyncClient(verify=verify, timeout=20)
+        clients[verify] = client
+    return client
 
 
 async def close_async_clients() -> None:
     """Close and forget HTTP clients owned by the current event loop."""
-    loop = asyncio.get_running_loop()
-    with _http_clients_lock:
-        clients = [
-            (key, client)
-            for key, client in _http_clients.items()
-            if key[0] is loop
-        ]
-        for key, _ in clients:
-            del _http_clients[key]
-    await asyncio.gather(*(client.aclose() for _, client in clients))
+    clients = _loop_http_clients(asyncio.get_running_loop())
+    to_close = list(clients.values())
+    clients.clear()
+    await asyncio.gather(*(client.aclose() for client in to_close))
 
 
 class BCRClient(BaseClient):
