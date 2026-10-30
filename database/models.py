@@ -240,6 +240,12 @@ class GrandDefenceCache(DataBase, table=True):
     vs_time: int = Field(default=0, title="更新时间")
 
 
+class BattleEntryState(DataBase, table=True):
+    __table_args__ = {"keep_existing": True}
+    group_id: int = Field(primary_key=True)
+    state: str = Field(default='')
+
+
 class CookieCache(DataBase, table=True):
     __table_args__ = {"keep_existing": True}
     token: str = Field(primary_key=True, title="token")

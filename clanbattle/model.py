@@ -27,6 +27,7 @@ from ..util.tools import anywhere_send
 from ..util.auto_boss import clan_boss_info
 from .base import find_item, format_bignum, format_precent
 from .damage_correction import DamageCorrectionTracker
+from .entry_tracker import EntryTracker
 
 from traceback import format_exc
 
@@ -48,6 +49,8 @@ class ClanBattle:
         self.period = ""
         self.dao_update_time = 0  # 网页端更新标记
         self.damage_correction = DamageCorrectionTracker()
+        self.entry_lock = asyncio.Lock()
+        self.entries = EntryTracker('')
 
     async def init(self, client: BaseClient, user_id: int, bot_id: int):
         self.loop_num += 1
@@ -68,6 +71,14 @@ class ClanBattle:
             clan_battle_top = await self.get_clanbattle_top()
 
         self.clan_battle_id = clan_battle_top.clan_battle_id
+        async with self.entry_lock:
+            self.entries = EntryTracker(
+                f'{self.clan_id}:{self.clan_battle_id}',
+                await pcr_sqla.get_battle_entries(self.group_id),
+            )
+            for history in sorted(clan_battle_top.damage_history or [], key=lambda h: h.create_time):
+                self.entries.settle(history)
+            await pcr_sqla.save_battle_entries(self.group_id, self.entries.dump())
         self.clan_name = clan_battle_top.user_clan.clan_name
         self.lap_num = clan_battle_top.lap_num
         self.period = clan_boss_info.lap2stage(self.lap_num)
@@ -94,10 +105,13 @@ class ClanBattle:
                 reload_detail_info = await self.client.clan_battle_detail_info(
                     self.clan_id, self.clan_battle_id, lap_num, order
                 )
-                if reload_detail_info.fighter_num != boss.fighter_num:
-                    boss.fighter_num = reload_detail_info.fighter_num
-                    return reload_detail_info.fighter_num
+                async with self.entry_lock:
+                    added = self.entries.observe(order, lap_num, reload_detail_info.fighter_num, int(time.time()))
+                    await pcr_sqla.save_battle_entries(self.group_id, self.entries.dump())
+                    boss.fighter_num = len(self.entries.bosses.get(str(order), {}).get('entries', []))
+                    return boss.fighter_num if added else 0
         except Exception:
+            logger.exception('读取或保存进刀计时失败')
             return 0
         return 0  # 0不播报，没改变不报，改变了是0也不报
 
@@ -234,24 +248,26 @@ class ClanBattle:
             ):
                 self.notice_subscribe.append(subscribe_text)
                 # 查看当前出刀人数
-            if fighter_num := await self.refresh_fighter_num(
-                current_boss.lap_num, current_boss.order_num
-            ):
-                self.notice_fighter.append(f"{i+1}王当前有{fighter_num}人出刀")
             if (
                 current_boss.current_hp != boss.current_hp
                 or current_boss.lap_num != boss.lap_num
             ):
                 change = True
-                boss.refresh(
-                    current_boss.current_hp,
-                    current_boss.lap_num,
-                    current_boss.order_num,
-                    current_boss.max_hp,
-                )
+                boss.refresh(current_boss.current_hp, current_boss.lap_num,
+                             current_boss.order_num, current_boss.max_hp)
+            if fighter_num := await self.refresh_fighter_num(
+                current_boss.lap_num, current_boss.order_num
+            ):
+                self.notice_fighter.append(self.entries.describe(i + 1, int(time.time())))
         return change
 
     async def record_change(self, clan_battle_top: ClanBattleTopResponse):
+        async with self.entry_lock:
+            for history in sorted(clan_battle_top.damage_history or [], key=lambda h: h.create_time):
+                self.entries.settle(history)
+            await pcr_sqla.save_battle_entries(self.group_id, self.entries.dump())
+            for order, boss in enumerate(self.boss, 1):
+                boss.fighter_num = len(self.entries.bosses.get(str(order), {}).get('entries', []))
         for history in self.damage_correction.update(clan_battle_top):
             damage = self.damage_correction.history_damage(history)
             correction = (
@@ -297,7 +313,8 @@ class ClanBattle:
         return (
             "当前进度："
             + f"{self.period}面{stage_dict[self.period]}阶段\n"
-            + "\n".join([boss.boss_info() for boss in self.boss])
+            + "\n".join(boss.boss_info() + ('\n' + detail if (detail := self.entries.describe(i, int(time.time()))) else '')
+                        for i, boss in enumerate(self.boss, 1))
         )
 
 
@@ -323,8 +340,6 @@ class Boss:
         msg = f"{self.lap_num}周目{self.order}王: "
         if self.current_hp:
             msg += f"HP: {format_bignum(self.current_hp)}/{format_bignum(self.max_hp)} {format_precent(self.current_hp/self.max_hp)}"
-            if self.fighter_num:
-                msg += f" 当前有{self.fighter_num}人挑战"
         else:
             msg += "无法挑战"
         return msg
