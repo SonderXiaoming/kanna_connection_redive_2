@@ -9,23 +9,36 @@ class EntryTracker:
         self.period = period
         self.bosses = {}
         self.settled = []
+        self.defeated = set()
         if saved:
             data = json.loads(saved)
             if data.get('period') == period:
                 self.bosses = data['bosses']
                 self.settled = data.get('settled', [])
+                self.defeated = set(data.get('defeated', []))
 
     def dump(self):
-        return json.dumps({'period': self.period, 'bosses': self.bosses, 'settled': self.settled})
+        return json.dumps({'period': self.period, 'bosses': self.bosses,
+                           'settled': self.settled, 'defeated': sorted(self.defeated)})
 
     def settle(self, history):
         key = f'{history.history_id}:{history.viewer_id}:{history.lap_num}:{history.order_num}:{history.create_time}'
+        if history.kill:
+            # No remaining attempt against this defeated boss can settle.
+            self.defeated.add(f'{history.order_num}:{history.lap_num}')
+            state = self.bosses.get(str(history.order_num))
+            if state is not None:
+                state['entries'] = [entry for entry in state['entries']
+                                    if entry['lap'] != history.lap_num]
         if key in self.settled:
             return
-        self.finish(history.order_num, history.lap_num, history.create_time)
+        if not history.kill:
+            self.finish(history.order_num, history.lap_num, history.create_time)
         self.settled.append(key)
 
     def observe(self, boss, lap, count, now):
+        if f'{boss}:{lap}' in self.defeated:
+            return False
         if count is None or count < 0:
             return False
         state = self.bosses.setdefault(str(boss), {'lap': lap, 'count': 0, 'entries': []})
