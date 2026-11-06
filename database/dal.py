@@ -11,6 +11,7 @@ from sqlmodel import SQLModel, func
 from ..basedata import FilePath, NoticeType
 from .models import (
     Account,
+    BattleEntryState,
     ArenaSetting,
     ClanBattleKPI,
     ClanBattleMember,
@@ -37,6 +38,16 @@ def pcr_date(timeStamp: int) -> datetime:
 
 
 class SQALA:
+    async def get_battle_entries(self, group_id):
+        async with self.async_session() as session:
+            row = await session.get(BattleEntryState, group_id)
+            return row.state if row else ''
+
+    async def save_battle_entries(self, group_id, state):
+        async with self.async_session() as session:
+            async with session.begin():
+                await session.merge(BattleEntryState(group_id=group_id, state=state))
+
     def __init__(self, url: str):
         self.url = f"sqlite+aiosqlite:///{url}"
         self.engine = create_async_engine(

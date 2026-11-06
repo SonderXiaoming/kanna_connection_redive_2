@@ -49,7 +49,7 @@ help_text = """
 【查树】栞栞树上有几个人
 【下树】寄，掉刀了
 【挂树 + 数字】失误了, 寄
-【sl】记录sl
+【sl】记录群成员SL；仅一条进刀时自动结束计时，多条时请用sl1～sl5指定Boss
 【sl?】栞栞今天有没有用过sl
 【申请出刀 + 数字 + （留言） 】 申请打boss，boss死亡自动清空
 【取消申请】 模拟10次挂10次，老子不打了
@@ -250,16 +250,40 @@ async def cleansubscirbe(bot: HoshinoBot, ev: CQEvent, qq_id: int):
     await bot.send(ev, "清除成功", at_sender=True)
 
 
-@sv.on_fullmatch(("sl", "SL", "Sl"))
+@sv.on_rex(r"^[sS][lL]\s*([1-5])?$")
 async def addsl(bot: HoshinoBot, ev: CQEvent):
+    clan = clanbattle_info.get(ev.group_id)
+    specified = ev['match'].group(1)
 
-    if await pcr_sqla.add_sl(
-        SLDao(group_id=ev.group_id, user_id=ev.user_id, time=int(time.time()))
-    ):
-        notice_update_time[ev.group_id] = int(time.time())
-        await bot.send(ev, "SL已记录", at_sender=True)
+    async def record_sl():
+        return await pcr_sqla.add_sl(
+            SLDao(group_id=ev.group_id, user_id=ev.user_id, time=int(time.time()))
+        )
+
+    if clan is None:
+        added = await record_sl()
+        message = 'SL已记录' if added else '今天已经SL过了'
     else:
-        await bot.send(ev, "今天已经SL过了", at_sender=True)
+        async with clan.entry_lock:
+            active = clan.entries.active_bosses()
+            count = sum(len(state['entries']) for state in clan.entries.bosses.values())
+            if not specified and count > 1:
+                await bot.send(ev, '当前有多条进刀，请发送 sl1～sl5 指定Boss', at_sender=True)
+                return
+            boss = int(specified) if specified else active[0] if active else None
+            if specified and boss not in active:
+                await bot.send(ev, f'{boss}王没有待结束的进刀，请核对Boss编号；SL尚未记录。', at_sender=True)
+                return
+            added = await record_sl()
+            message = 'SL已记录' if added else '今天已经SL过了'
+            if added and boss is not None:
+                clan.entries.finish(boss)
+                await pcr_sqla.save_battle_entries(ev.group_id, clan.entries.dump())
+                clan.boss[boss - 1].fighter_num = len(clan.entries.bosses[str(boss)]['entries'])
+                message += f'，已结束{boss}王最早一条进刀计时'
+    if added:
+        notice_update_time[ev.group_id] = int(time.time())
+    await bot.send(ev, message, at_sender=True)
 
 
 @sv.on_fullmatch(("sl?", "SL?", "sl？", "SL？"))
