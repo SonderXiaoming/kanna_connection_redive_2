@@ -37,7 +37,8 @@ from ..database.models import (
     WebNotificationSetting,
 )
 from ..basedata import NoticeType, Platform
-from ..client import check_client, get_access_key, pcrclient, tw_pcrclient
+from ..client import check_client, get_access_key, pcrclient, tw_pcrclient, CrossLoopLock
+from ..client.apiclient import close_async_clients
 from ..login import query
 from ..support_query.util import (
     change_support_unit,
@@ -57,6 +58,12 @@ from sse_starlette.sse import EventSourceResponse
 
 api_app = FastAPI()
 
+
+@api_app.on_event("shutdown")
+async def close_webui_loop_async_clients():
+    await close_async_clients()
+
+
 report_versions: Dict[int, int] = {}
 notice_versions: Dict[int, int] = {}
 avatar_cache: Dict[int, Tuple[float, bytes, str]] = {}
@@ -75,7 +82,7 @@ ROLE_NAMES = {
 QQ_ROLE_LEVELS = {"member": ROLE_EMPLOYEE, "admin": ROLE_FOREMAN, "administrator": ROLE_FOREMAN, "owner": ROLE_MANAGER}
 NOTIFICATION_EVENT_TYPES = {"notice", "report", "monitor", "arena", "role", "account", "system"}
 bot_group_cache: Tuple[float, List[dict]] = (0.0, [])
-game_action_locks: Dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+game_action_locks: Dict[int, CrossLoopLock] = defaultdict(CrossLoopLock)
 
 
 async def require_game_login_confirmation(

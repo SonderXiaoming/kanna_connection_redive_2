@@ -8,7 +8,7 @@ from base64 import b64decode, b64encode
 from hashlib import md5, sha1
 from json import loads
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 import httpx
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
@@ -145,8 +145,44 @@ qu_apiroot = ServerManager(
     ]
 )
 
-CLIENT = httpx.AsyncClient(timeout=20)
-TW_CLIENT = httpx.AsyncClient(verify=False, timeout=20)
+def _current_loop():
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.get_event_loop()
+
+
+def _loop_http_clients(
+    loop: asyncio.AbstractEventLoop,
+) -> Dict[bool, httpx.AsyncClient]:
+    clients = getattr(loop, "_kanna_http_clients", None)
+    if clients is None:
+        clients = {}
+        loop._kanna_http_clients = clients
+    return clients
+
+
+def get_async_client(verify: bool = True) -> httpx.AsyncClient:
+    """返回绑定在当前事件循环上的 httpx 客户端。
+
+    httpx/httpcore/anyio 的连接池内部对象同样只能绑定一个 loop，跨 loop
+    复用连接会抛 "got Future attached to a different loop"。因此按
+    (loop, verify) 惰性创建客户端，各 loop 拥有独立的连接池。
+    """
+    clients = _loop_http_clients(_current_loop())
+    client = clients.get(verify)
+    if client is None:
+        client = httpx.AsyncClient(verify=verify, timeout=20)
+        clients[verify] = client
+    return client
+
+
+async def close_async_clients() -> None:
+    """Close and forget HTTP clients owned by the current event loop."""
+    clients = _loop_http_clients(asyncio.get_running_loop())
+    to_close = list(clients.values())
+    clients.clear()
+    await asyncio.gather(*(client.aclose() for client in to_close))
 
 
 class BCRClient(BaseClient):
@@ -162,7 +198,6 @@ class BCRClient(BaseClient):
             b_apiroot if self.qudao == GamePlatform.b_id.value else qu_apiroot
         )
         self.set_platform(self.qudao)
-        self.client = CLIENT
         self.uid = uid
         self.access_key = access_key
         self.platfrom = platform
@@ -184,7 +219,7 @@ class BCRClient(BaseClient):
     async def callapi(self, request: RequestBase) -> Union[dict, Tuple[dict, dict]]:
         try:
             api_root = self.apiroot_manager.select_best_server()
-            async with self.call_lock:
+            async with self._api_lock:
                 key = BCRClient.createkey()
                 if self.viewer_id is not None:
                     request.viewer_id = (
@@ -192,7 +227,7 @@ class BCRClient(BaseClient):
                         if request.crypted
                         else str(self.viewer_id)
                     )
-                resp = await self.client.post(
+                resp = await get_async_client().post(
                     api_root + request.url,
                     data=(
                         self.pack(request.dict(by_alias=True), key)
@@ -378,49 +413,49 @@ class TWClient(BaseClient):
         return f"{uuid_str[:8]}-{uuid_str[8:12]}-{uuid_str[12:16]}-{uuid_str[16:20]}-{uuid_str[20:32]}"
 
     async def callapi(self, request: RequestBase) -> dict:
-        key = TWClient.createkey()
-
         try:
-            if self.viewer_id:
-                request.viewer_id = b64encode(self.encrypt(str(self.viewer_id), key))
-                request.tw_server_id = self.platform
-            packed, crypted = self.pack(request.dict(by_alias=True), key)
+            async with self._api_lock:
+                key = TWClient.createkey()
+                if self.viewer_id:
+                    request.viewer_id = b64encode(self.encrypt(str(self.viewer_id), key))
+                    request.tw_server_id = self.platform
+                packed, crypted = self.pack(request.dict(by_alias=True), key)
 
-            self.headers["PARAM"] = sha1(
-                (
-                    TWClient.format_uuid(self.udid)
-                    + f"/{request.url}"
-                    + b64encode(packed).decode("utf8")
-                    + str(self.viewer_id)
-                ).encode("utf8")
-            ).hexdigest()
-            self.headers["SHORT-UDID"] = TWClient._encode(self.short_udid)
+                self.headers["PARAM"] = sha1(
+                    (
+                        TWClient.format_uuid(self.udid)
+                        + f"/{request.url}"
+                        + b64encode(packed).decode("utf8")
+                        + str(self.viewer_id)
+                    ).encode("utf8")
+                ).hexdigest()
+                self.headers["SHORT-UDID"] = TWClient._encode(self.short_udid)
 
-            resp = await TW_CLIENT.post(
-                self.apiroot + request.url, data=crypted, headers=self.headers
-            )
-            response = self.unpack(resp.content)[0]
-
-            data_headers = response["data_headers"]
-
-            if "viewer_id" in data_headers:
-                self.viewer_id = data_headers["viewer_id"]
-
-            if "required_res_ver" in data_headers:
-                self.headers["RES-VER"] = data_headers["required_res_ver"]
-            data = response["data"]
-
-            if "server_error" in data:
-                data = data["server_error"]
-                code = data_headers["result_code"]
-                logger.info(
-                    f"pcrclient: {request.url} api failed code = {code}, {data}"
+                resp = await get_async_client(verify=False).post(
+                    self.apiroot + request.url, data=crypted, headers=self.headers
                 )
-                raise ApiException(
-                    data["message"], data["status"], data_headers["result_code"]
-                )
+                response = self.unpack(resp.content)[0]
 
-            return data
+                data_headers = response["data_headers"]
+
+                if "viewer_id" in data_headers:
+                    self.viewer_id = data_headers["viewer_id"]
+
+                if "required_res_ver" in data_headers:
+                    self.headers["RES-VER"] = data_headers["required_res_ver"]
+                data = response["data"]
+
+                if "server_error" in data:
+                    data = data["server_error"]
+                    code = data_headers["result_code"]
+                    logger.info(
+                        f"pcrclient: {request.url} api failed code = {code}, {data}"
+                    )
+                    raise ApiException(
+                        data["message"], data["status"], data_headers["result_code"]
+                    )
+
+                return data
         except ApiException:
             raise
         except binascii.Error:

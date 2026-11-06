@@ -9,6 +9,7 @@ from typing import Optional
 import httpx
 from loguru import logger
 from ..setting import JJCSetting
+from ..client.base import CrossLoopLock
 
 headers = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0",
@@ -39,7 +40,7 @@ _dllname = join(
 )
 _getsign = CDLL(_dllname).getSign
 _getsign.restype = POINTER(c_ubyte)
-semaphore = asyncio.Semaphore(1)
+semaphore = CrossLoopLock()
 
 
 def general_data(_def: list, page: int, region: int, sort: int) -> dict:

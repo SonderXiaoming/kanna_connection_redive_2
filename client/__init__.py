@@ -2,7 +2,7 @@ from ..errorclass import NeedReLoginError
 
 from .apiclient import BCRClient as pcrclient
 from .apiclient import TWClient as tw_pcrclient
-from .base import BaseClient
+from .base import BaseClient, CrossLoopLock
 from .bilbili_login import *
 from .playerpref import decryptxml, decrypt_access_key
 from .request import *
