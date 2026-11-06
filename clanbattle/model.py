@@ -26,10 +26,20 @@ from ..util.task_pool import PoolBase, PrioritizedQueryItemBase
 from ..util.tools import anywhere_send
 from ..util.auto_boss import clan_boss_info
 from .base import find_item, format_bignum, format_precent
-from .damage_correction import DamageCorrectionTracker
+from .damage_correction import DamageCorrectionTracker, history_key
 from .entry_tracker import EntryTracker
 
 from traceback import format_exc
+
+
+def estimate_carry_seconds(hp, raw_damage, start_time, battle_time):
+    # Only normal 90s attacks earn carryover. A short carryover cannot earn more.
+    if (not isinstance(hp, int) or not isinstance(raw_damage, int)
+            or not 0 < hp <= raw_damage or start_time != 90
+            or not isinstance(battle_time, int) or not 0 <= battle_time <= 90):
+        return None
+    # ceil(110 - elapsed * hp / damage), without floating-point rounding.
+    return min(90, 110 - battle_time * hp // raw_damage)
 
 
 class ClanBattle:
@@ -51,6 +61,7 @@ class ClanBattle:
         self.damage_correction = DamageCorrectionTracker()
         self.entry_lock = asyncio.Lock()
         self.entries = EntryTracker('')
+        self.report_timings = {}
 
     async def init(self, client: BaseClient, user_id: int, bot_id: int):
         self.loop_num += 1
@@ -163,6 +174,10 @@ class ClanBattle:
         time_line = await self.client.time_line_report(
             pcrid, self.clan_battle_id, record.battle_log_id
         )
+        if allow_damage_correction:
+            self.report_timings[(pcrid, record.lap_num, record.order_num, time)] = (
+                time_line.start_remain_time, time_line.battle_time, record.total_damage,
+            )
         temp_dict = {
             "group_id": self.group_id,
             "battle_log_id": time % 10000000,  # 这玩意居然会重复，受不了，直接取时间
@@ -270,13 +285,23 @@ class ClanBattle:
                 boss.fighter_num = len(self.entries.bosses.get(str(order), {}).get('entries', []))
         for history in self.damage_correction.update(clan_battle_top):
             damage = self.damage_correction.history_damage(history)
-            correction = (
-                f"（原始伤害{history.damage}，已扣除超量伤害）"
-                if damage < history.damage else ""
-            )
-            self.notice_dao.append(
-                f"{history.name}对{history.lap_num}周目{history.order_num}王造成了{damage}点伤害。{correction}"
-            )
+            if history.kill:
+                message = f"{history.name}对{history.lap_num}周目{history.order_num}王造成{damage}伤害并击破"
+                key = history_key(history)
+                timing = self.report_timings.get(key)
+                seconds = None
+                if timing is not None:
+                    start, elapsed, raw = timing
+                    seconds = estimate_carry_seconds(
+                        self.damage_correction.cap_for(key), max(raw, history.damage), start, elapsed,
+                    )
+                if seconds is not None:
+                    message += f"，预计返秒{seconds}s"
+                self.notice_dao.append(message + '。')
+            else:
+                self.notice_dao.append(
+                    f"{history.name}对{history.lap_num}周目{history.order_num}王造成了{damage}点伤害。"
+                )
             # 通知挂树，清空申请出刀
             if history.kill:
                 if offtree_text := await self.notice_text(
@@ -393,7 +418,6 @@ class ClanBattlePool(PoolBase):
             await clan_info.send_notice(
                 [NoticeType.dao.value, NoticeType.tree.value]
             )
-            await clan_info.add_record(loop_num)
             await clan_info.reconcile_damage()
             clan_info.error_count = 0
         asyncio.create_task(
